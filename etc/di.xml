@@ -1,0 +1,45 @@
+<?xml version="1.0"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="urn:magento:framework:ObjectManager/etc/config.xsd">
+
+    <preference for="Amadeco\ElasticSuiteBehavioral\Api\BehavioralServiceInterface"
+                type="Amadeco\ElasticSuiteBehavioral\Service\BehavioralService"/>
+
+    <preference for="Amadeco\ElasticSuiteBehavioral\Api\Data\BehavioralMetricInterface"
+                type="Amadeco\ElasticSuiteBehavioral\Model\BehavioralMetric"/>
+
+    <type name="Magento\Framework\Console\CommandListInterface">
+        <arguments>
+            <argument name="commands" xsi:type="array">
+                <item name="behavioral_calculate" xsi:type="object">Amadeco\ElasticSuiteBehavioral\Console\Command\CalculateScoreCommand</item>
+            </argument>
+        </arguments>
+    </type>
+
+    <type name="Smile\ElasticsuiteTracker\Model\EventQueue">
+        <arguments>
+            <argument name="eventProcessors" xsi:type="array">
+                <item name="amadeco_visible_ids" xsi:type="object">Amadeco\ElasticSuiteBehavioral\Model\Event\Processor\VisibleIds</item>
+            </argument>
+        </arguments>
+    </type>
+
+    <type name="Smile\ElasticsuiteCore\Index\DataSourceResolver">
+        <arguments>
+            <argument name="datasources" xsi:type="array">
+                <item name="catalog_product" xsi:type="array">
+                    <item name="behavioral" xsi:type="object">Amadeco\ElasticSuiteBehavioral\Model\Indexer\Fulltext\Datasource\BehavioralDataSource</item>
+                </item>
+            </argument>
+        </arguments>
+    </type>
+
+    <type name="Smile\ElasticsuiteCatalogOptimizer\Model\Optimizer\Functions\Provider\DefaultProvider">
+        <arguments>
+            <argument name="appliers" xsi:type="array">
+                <item name="behavioral" xsi:type="object">Amadeco\ElasticSuiteBehavioral\Model\Optimizer\Applier\BehavioralBoostApplier</item>
+            </argument>
+        </arguments>
+    </type>
+
+</config>

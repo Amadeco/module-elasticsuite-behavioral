@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<form xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:noNamespaceSchemaLocation="urn:magento:module:Magento_Ui:etc/ui_configuration.xsd">
+
+    <fieldset name="general">
+        <field name="model">
+            <argument name="data" xsi:type="array">
+                <item name="options" xsi:type="array">
+                    <item name="behavioral" xsi:type="array">
+                        <item name="value" xsi:type="string">behavioral</item>
+                        <item name="label" xsi:type="string" translate="true">Behavioral Scoring</item>
+                    </item>
+                </item>
+            </argument>
+        </field>
+    </fieldset>
+
+    <fieldset name="behavioral_configuration" sortOrder="20">
+        <argument name="data" xsi:type="array">
+            <item name="config" xsi:type="array">
+                <item name="label" xsi:type="string" translate="true">Behavioral Algorithm Tuning</item>
+                <item name="component" xsi:type="string">Smile_ElasticsuiteCatalogOptimizer/js/components/form/optimizer/fieldset-visibility</item>
+                <item name="imports" xsi:type="array">
+                    <item name="initValue" xsi:type="string">${ $.provider }:data.model</item>
+                </item>
+                <item name="listens" xsi:type="array">
+                    <item name="${ $.provider }:data.model" xsi:type="string">onChange</item>
+                </item>
+                <item name="displayedForValues" xsi:type="array">
+                    <item name="behavioral" xsi:type="string">behavioral</item>
+                </item>
+            </item>
+        </argument>
+
+        <field name="base_weight" sortOrder="10" formElement="input">
+            <argument name="data" xsi:type="array">
+                <item name="config" xsi:type="array">
+                    <item name="source" xsi:type="string">optimizer</item>
+                    <item name="dataScope" xsi:type="string">config.base_weight</item>
+                    <item name="default" xsi:type="number">2.0</item>
+                    <item name="component" xsi:type="string">Smile_ElasticsuiteCatalogOptimizer/js/components/form/optimizer/constant_score/slider</item>
+                    <item name="sliderConfig" xsi:type="array">
+                        <item name="minValue" xsi:type="number">0</item>
+                        <item name="maxValue" xsi:type="number">10</item>
+                        <item name="step" xsi:type="number">0.1</item>
+                    </item>
+                    <item name="additionalClasses" xsi:type="string">slider-field</item>
+                </item>
+            </argument>
+            <settings>
+                <label translate="true">Global Performance Weight (Sales/CTR)</label>
+                <dataType>string</dataType>
+                <tooltip>
+                    <description translate="true">Multiplier for the main performance score. 2.0 is standard.</description>
+                </tooltip>
+                <validation>
+                    <rule name="required-entry" xsi:type="boolean">true</rule>
+                    <rule name="validate-number-range" xsi:type="string">0-10</rule>
+                </validation>
+                <imports>
+                    <link name="disabled">${ $.parentName}:disableChildren</link>
+                </imports>
+            </settings>
+        </field>
+
+        <field name="freshness_weight" sortOrder="20" formElement="input">
+            <argument name="data" xsi:type="array">
+                <item name="config" xsi:type="array">
+                    <item name="source" xsi:type="string">optimizer</item>
+                    <item name="dataScope" xsi:type="string">config.freshness_weight</item>
+                    <item name="default" xsi:type="number">1.5</item>
+                    <item name="component" xsi:type="string">Smile_ElasticsuiteCatalogOptimizer/js/components/form/optimizer/constant_score/slider</item>
+                    <item name="sliderConfig" xsi:type="array">
+                        <item name="minValue" xsi:type="number">0</item>
+                        <item name="maxValue" xsi:type="number">10</item>
+                        <item name="step" xsi:type="number">0.1</item>
+                    </item>
+                    <item name="additionalClasses" xsi:type="string">slider-field</item>
+                </item>
+            </argument>
+            <settings>
+                <label translate="true">Freshness Boost Weight</label>
+                <dataType>string</dataType>
+                <tooltip>
+                    <description translate="true">Multiplier for New Products. 1.5 is standard.</description>
+                </tooltip>
+                <validation>
+                    <rule name="required-entry" xsi:type="boolean">true</rule>
+                    <rule name="validate-number-range" xsi:type="string">0-10</rule>
+                </validation>
+                <imports>
+                    <link name="disabled">${ $.parentName}:disableChildren</link>
+                </imports>
+            </settings>
+        </field>
+    </fieldset>
+
+</form>

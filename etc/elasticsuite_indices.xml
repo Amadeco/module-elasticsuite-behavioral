@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<indices xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="urn:magento:module:Smile_ElasticsuiteCore:etc/elasticsuite_indices.xsd">
+    <index identifier="catalog_product" defaultSearchType="product">
+        <type name="product" idFieldName="entity_id">
+            <mapping>
+                <field name="behavioral_score" type="integer">
+                    <isFilterable>1</isFilterable>
+                    <isUsedForSortBy>1</isUsedForSortBy>
+                </field>
+                <field name="is_new_boost" type="integer">
+                    <isFilterable>1</isFilterable>
+                </field>
+            </mapping>
+        </type>
+    </index>
+
+    <index identifier="tracking_log_event" defaultSearchType="event">
+        <type name="event" idFieldName="event_id">
+            <mapping>
+                <field name="page.product_list.visible_ids" type="integer">
+                    <isSearchable>0</isSearchable>
+                    <isFilterable>1</isFilterable>
+                </field>
+                <field name="page.product_list.visible_count" type="integer" />
+            </mapping>
+        </type>
+    </index>
+</indices>

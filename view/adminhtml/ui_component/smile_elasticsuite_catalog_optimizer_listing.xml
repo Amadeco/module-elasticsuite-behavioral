@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<listing xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="urn:magento:module:Magento_Ui:etc/ui_configuration.xsd">
+
+    <columns name="smile_elasticsuite_catalog_optimizer_columns">
+        <column name="model">
+            <argument name="data" xsi:type="array">
+                <item name="options" xsi:type="array">
+                    <item name="behavioral" xsi:type="array">
+                        <item name="value" xsi:type="string">behavioral</item>
+                        <item name="label" xsi:type="string" translate="true">Behavioral Scoring</item>
+                    </item>
+                </item>
+            </argument>
+        </column>
+    </columns>
+
+</listing>

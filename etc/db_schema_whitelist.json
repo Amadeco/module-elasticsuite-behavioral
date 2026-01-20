@@ -1,0 +1,25 @@
+{
+    "behavioral_analysis": {
+        "column": {
+            "product_id": true,
+            "store_id": true,
+            "raw_views": true,
+            "raw_clicks": true,
+            "raw_add_to_carts": true,
+            "raw_sales": true,
+            "raw_revenue": true,
+            "rating_score": true,
+            "global_score": true,
+            "is_new_boost": true,
+            "updated_at": true
+        },
+        "index": {
+            "BEHAVIORAL_ANALYSIS_GLOBAL_SCORE": true
+        },
+        "constraint": {
+            "PRIMARY": true,
+            "BEHAVIORAL_ANALYSIS_PRODUCT_ID_CATALOG_PRODUCT_ENTITY_ENTITY_ID": true,
+            "BEHAVIORAL_ANALYSIS_STORE_ID_STORE_STORE_ID": true
+        }
+    }
+}

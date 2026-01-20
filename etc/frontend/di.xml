@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="urn:magento:framework:ObjectManager/etc/config.xsd">
+
+    <type name="Magento\Catalog\Block\Product\ListProduct">
+        <plugin name="amadeco_behavioral_capture_visible_products"
+                type="Amadeco\ElasticSuiteBehavioral\Plugin\Block\CaptureVisibleProductsPlugin"
+                sortOrder="10"/>
+    </type>
+
+    <type name="Smile\ElasticsuiteTracker\Block\Variables\Page\Catalog">
+        <plugin name="amadeco_behavioral_expose_visible_products"
+                type="Amadeco\ElasticSuiteBehavioral\Plugin\Tracker\ExposeVisibleProductsPlugin"
+                sortOrder="10"/>
+    </type>
+
+</config>

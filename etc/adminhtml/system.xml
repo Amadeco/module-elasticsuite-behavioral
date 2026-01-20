@@ -1,0 +1,146 @@
+<?xml version="1.0"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="urn:magento:module:Magento_Config:etc/system_file.xsd">
+    <system>
+        <section id="behavioral_merchandising" translate="label" sortOrder="920" showInDefault="1" showInWebsite="1" showInStore="1">
+            <label>Behavioral Merchandising</label>
+            <tab>smile_elasticsuite</tab>
+            <resource>Amadeco_ElasticSuiteBehavioral::config</resource>
+
+            <group id="general" translate="label" sortOrder="10" showInDefault="1" showInWebsite="1" showInStore="1">
+                <label>General Settings</label>
+
+                <field id="enable" translate="label" type="select" sortOrder="10" showInDefault="1" showInWebsite="1" showInStore="1" canRestore="1">
+                    <label>Enable Behavioral Analysis</label>
+                    <source_model>Magento\Config\Model\Config\Source\Enabledisable</source_model>
+                    <comment>Prerequisite: This module relies on Smile_ElasticsuiteTracker. Warning: If the tracker is disabled, Views, Clicks, and Add-to-Cart scores will be 0.</comment>
+                </field>
+
+                <field id="analysis_period" translate="label comment" type="text" sortOrder="20" showInDefault="1" showInWebsite="1" showInStore="1" canRestore="1">
+                    <label>Analysis Lookback Period</label>
+                    <comment>Number of days of history to use for scoring calculation.</comment>
+                    <tooltip>Short periods (30 days) react faster to trends. Long periods (90+ days) smooth out seasonality.</tooltip>
+                    <validate>validate-digits</validate>
+                </field>
+
+                <field id="debug_mode" translate="label comment" type="select" sortOrder="40" showInDefault="1" showInWebsite="1" showInStore="1" canRestore="1">
+                    <label>Enable Debug Mode</label>
+                    <source_model>Magento\Config\Model\Config\Source\Enabledisable</source_model>
+                    <comment>Logs raw calculation steps to system.log. Keep disabled in production.</comment>
+                </field>
+            </group>
+
+            <group id="weights" translate="label comment" sortOrder="20" showInDefault="1" showInWebsite="1" showInStore="1">
+                <label>Score Algorithm Weights</label>
+
+                <field id="weights_intro" translate="label" type="label" sortOrder="5" showInDefault="1" showInWebsite="1" showInStore="1">
+                    <label>Balancing Strategy</label>
+                    <comment>Define the relative importance of each metric (0 to 100). Example: Setting Sales to 50 and Clicks to 10 makes Sales 5x more important.</comment>
+                </field>
+
+                <field id="weight_ctr" translate="label" type="text" sortOrder="10" showInDefault="1" showInWebsite="1" showInStore="1" canRestore="1">
+                    <label>Attractiveness (CTR)</label>
+                    <comment>Weight for Click-Through Rate.</comment>
+                    <tooltip>Measures how often customers click when they see the product.</tooltip>
+                    <validate>validate-number</validate>
+                </field>
+
+                <field id="weight_atc" translate="label comment" type="text" sortOrder="20" showInDefault="1" showInWebsite="1" showInStore="1" canRestore="1">
+                    <label>Intent (Add to Cart)</label>
+                    <comment>Weight for Add-to-Cart actions.</comment>
+                    <tooltip>Higher intent signal than a click, but lower than a finalized sale.</tooltip>
+                    <validate>validate-number</validate>
+                </field>
+
+                <field id="weight_sales" translate="label" type="text" sortOrder="30" showInDefault="1" showInWebsite="1" showInStore="1" canRestore="1">
+                    <label>Conversion (Sales Qty)</label>
+                    <comment>Weight for total items sold.</comment>
+                    <validate>validate-number</validate>
+                </field>
+
+                <field id="weight_revenue" translate="label" type="text" sortOrder="40" showInDefault="1" showInWebsite="1" showInStore="1" canRestore="1">
+                    <label>Value (Revenue)</label>
+                    <comment>Weight for total revenue generated.</comment>
+                    <tooltip>Helps promote high-ticket items even if they sell fewer units.</tooltip>
+                    <validate>validate-number</validate>
+                </field>
+
+                <field id="weight_rating" translate="label" type="text" sortOrder="50" showInDefault="1" showInWebsite="1" showInStore="1" canRestore="1">
+                    <label>Social Proof (Ratings)</label>
+                    <comment>Weight for Review Rating (Stars).</comment>
+                    <validate>validate-number</validate>
+                </field>
+
+                <field id="weight_bounce_penalty" translate="label comment" type="text" sortOrder="60" showInDefault="1" showInWebsite="1" showInStore="1" canRestore="1">
+                    <label>Penalty: Bounce Rate</label>
+                    <comment>[Negative Factor] Reduces score for products with many views but no sales.</comment>
+                    <validate>validate-number</validate>
+                </field>
+            </group>
+
+            <group id="constraints" translate="label" sortOrder="30" showInDefault="1" showInWebsite="1" showInStore="1">
+                <label>Eligibility Constraints</label>
+
+                <field id="check_stock" translate="label comment" type="select" sortOrder="10" showInDefault="1" showInWebsite="1" showInStore="1" canRestore="1">
+                    <label>Filter Out-of-Stock Products</label>
+                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
+                    <comment>If No, out-of-stock products will still receive a score.</comment>
+                </field>
+
+                <field id="check_discontinued" translate="label comment" type="select" sortOrder="20" showInDefault="1" showInWebsite="1" showInStore="1" canRestore="1">
+                    <label>Filter Discontinued Products</label>
+                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
+                    <comment>If Yes, checks the 'discontinued' attribute. If No, ignores it.</comment>
+                </field>
+            </group>
+
+            <group id="anti_echo" translate="label comment" sortOrder="40" showInDefault="1" showInWebsite="1" showInStore="1">
+                <label>Ranking Dynamics &amp; Discovery</label>
+                <comment>Policies to prevent catalog stagnation ("The Rich Get Richer" effect).</comment>
+
+                <field id="ctr_normalization_ceiling" translate="label comment" type="text" sortOrder="10" showInDefault="1" showInWebsite="1" showInStore="1" canRestore="1">
+                    <label>CTR "Perfect Score" Threshold (%)</label>
+                    <comment>Percentage of CTR considered as "Max Score". Default: 15.</comment>
+                    <tooltip>Example: If set to 15%, any product with 15% CTR or higher gets the maximum possible points for the CTR metric. This prevents outliers from crushing other products.</tooltip>
+                    <validate>validate-number</validate>
+                </field>
+
+                <field id="bayesian_min_views" translate="label comment" type="text" sortOrder="20" showInDefault="1" showInWebsite="1" showInStore="1" canRestore="1">
+                    <label>Minimum Views for Confidence</label>
+                    <comment>Views required before a product's raw CTR is fully trusted.</comment>
+                    <tooltip>Technical: Bayesian Smoothing threshold. Below this number, the score is pulled towards the category average to prevent statistical noise (e.g., 1 click on 1 view = 100% CTR).</tooltip>
+                    <validate>validate-digits</validate>
+                </field>
+
+                <field id="freshness_duration" translate="label comment" type="text" sortOrder="30" showInDefault="1" showInWebsite="1" showInStore="1" canRestore="1">
+                    <label>New Product Boost Period</label>
+                    <comment>Days a new product gets an artificial boost.</comment>
+                    <validate>validate-digits</validate>
+                    <tooltip>Allows new products to appear at the top to gather data before the real behavioral score takes over.</tooltip>
+                </field>
+
+                <field id="boost_coming_soon" translate="label comment" type="select" sortOrder="35" showInDefault="1" showInWebsite="1" showInStore="1" canRestore="1">
+                    <label>Boost "Coming Soon" Products</label>
+                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
+                    <comment>If Yes, products that are New but Out of Stock will still receive the Freshness Boost. Useful for "Preview" merchandising.</comment>
+                </field>
+
+                <field id="enable_shuffle" translate="label comment" type="select" sortOrder="40" showInDefault="1" showInWebsite="1" showInStore="1" canRestore="1">
+                    <label>Enable Discovery Shuffle</label>
+                    <source_model>Magento\Config\Model\Config\Source\Enabledisable</source_model>
+                    <comment>Periodically rotates products with similar scores.</comment>
+                </field>
+
+                <field id="shuffle_weight" translate="label comment" type="text" sortOrder="50" showInDefault="1" showInWebsite="1" showInStore="1" canRestore="1">
+                    <label>Shuffle Intensity (1-10)</label>
+                    <comment>How aggressively to randomize the ranking.</comment>
+                    <validate>validate-digits</validate>
+                    <tooltip>Low (1-3): Subtle rotation of middle-pack products. High (8-10): Visible chaos, good for high-traffic discovery catalogs.</tooltip>
+                    <depends>
+                        <field id="enable_shuffle">1</field>
+                    </depends>
+                </field>
+            </group>
+        </section>
+    </system>
+</config>

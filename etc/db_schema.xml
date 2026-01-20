@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<schema xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="urn:magento:framework:Setup/Declaration/Schema/etc/schema.xsd">
+
+    <table name="behavioral_analysis" resource="default" engine="innodb" comment="Stores calculated behavioral scores per product">
+        <column xsi:type="int" name="product_id" padding="10" unsigned="true" nullable="false" identity="false" comment="Product ID"/>
+        <column xsi:type="smallint" name="store_id" padding="5" unsigned="true" nullable="false" identity="false" comment="Store ID"/>
+
+        <column xsi:type="int" name="raw_views" padding="10" unsigned="true" nullable="false" default="0" comment="Aggregated Views (Tracker)"/>
+        <column xsi:type="int" name="raw_clicks" padding="10" unsigned="true" nullable="false" default="0" comment="Aggregated Clicks (Tracker)"/>
+        <column xsi:type="int" name="raw_add_to_carts" padding="10" unsigned="true" nullable="false" default="0" comment="Aggregated Add to Cart Events (Tracker)"/>
+        <column xsi:type="int" name="raw_sales" padding="10" unsigned="true" nullable="false" default="0" comment="Aggregated Sales Qty"/>
+        <column xsi:type="decimal" name="raw_revenue" scale="4" precision="12" unsigned="false" nullable="false" default="0.0000" comment="Aggregated Revenue"/>
+        <column xsi:type="smallint" name="rating_score" padding="5" unsigned="true" nullable="false" default="0" comment="Average Rating Percent (0-100)"/>
+
+        <column xsi:type="int" name="global_score" padding="10" unsigned="true" nullable="false" default="0" comment="Final Normalized Score (0-100)"/>
+        <column xsi:type="smallint" name="is_new_boost" padding="5" unsigned="true" nullable="false" default="0" comment="Freshness Boost Value"/>
+
+        <column xsi:type="timestamp" name="updated_at" on_update="true" nullable="false" default="CURRENT_TIMESTAMP" comment="Last Calculation Date"/>
+
+        <constraint xsi:type="primary" referenceId="PRIMARY">
+            <column name="product_id"/>
+            <column name="store_id"/>
+        </constraint>
+
+        <constraint xsi:type="foreign" referenceId="FK_BEHAVIORAL_PRODUCT"
+                    table="behavioral_analysis" column="product_id"
+                    referenceTable="catalog_product_entity" referenceColumn="entity_id"
+                    onDelete="CASCADE"/>
+
+        <constraint xsi:type="foreign" referenceId="FK_BEHAVIORAL_STORE"
+                    table="behavioral_analysis" column="store_id"
+                    referenceTable="store" referenceColumn="store_id"
+                    onDelete="CASCADE"/>
+
+        <index referenceId="BEHAVIORAL_GLOBAL_SCORE_INDEX" indexType="btree">
+            <column name="global_score"/>
+        </index>
+    </table>
+</schema>
