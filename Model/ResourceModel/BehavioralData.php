@@ -44,6 +44,7 @@ class BehavioralData
      */
     public const string TABLE_BEHAVIORAL_ANALYSIS = 'behavioral_analysis';
     public const string TABLE_CATALOG_PRODUCT = 'catalog_product_entity';
+    public const string TABLE_CATALOG_PRODUCT_SUPER_LINK = 'catalog_product_super_link';
     public const string TABLE_SALES_ORDER_ITEM = 'sales_order_item';
     public const string TABLE_REVIEW_SUMMARY = 'review_entity_summary';
 
