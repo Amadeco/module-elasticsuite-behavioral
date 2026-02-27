@@ -15,6 +15,7 @@ namespace Amadeco\ElasticSuiteBehavioral\Model\Calculator;
 
 use Amadeco\ElasticSuiteBehavioral\Api\Data\BehavioralMetricInterface;
 use Amadeco\ElasticSuiteBehavioral\Model\Config;
+use Magento\Framework\Stdlib\DateTime\TimezoneInterface;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -22,6 +23,7 @@ use Psr\Log\LoggerInterface;
  *
  * Optimized for high-throughput (O(1) memory) by caching store-level configurations
  * and preventing repetitive object instantiations inside the calculation loops.
+ * Adheres strictly to SRP by delegating specific mathematical concepts to specialized classes.
  */
 class ScoreCalculator
 {
@@ -35,7 +37,6 @@ class ScoreCalculator
      * Date processing constants.
      */
     private const string TIMEZONE_UTC = 'UTC';
-    private const string DATETIME_NOW = 'now';
 
     /**
      * @var array<int, array<string, mixed>> L1 Cache for store-level configurations to prevent O(N) lookups.
@@ -48,26 +49,28 @@ class ScoreCalculator
     private array $nowCache = [];
 
     /**
-     * @param BayesianSmoother $smoother
-     * @param Config $config
-     * @param ShuffleCalculator $shuffleCalculator
-     * @param LoggerInterface $logger
+     * @param BayesianSmoother $smoother Handles logarithmic normalization and Bayesian averages.
+     * @param Config $config Module configuration provider.
+     * @param ShuffleCalculator $shuffleCalculator Handles the Anti-Echo deterministic randomization.
+     * @param TimezoneInterface $timezone Manages chronological state (Injected for testability).
+     * @param LoggerInterface $logger Handles debug output.
      */
     public function __construct(
         private readonly BayesianSmoother $smoother,
         private readonly Config $config,
         private readonly ShuffleCalculator $shuffleCalculator,
+        private readonly TimezoneInterface $timezone,
         private readonly LoggerInterface $logger
     ) {
     }
 
     /**
-     * Calculate the final score for a single product.
+     * Calculate the final score and formatted row for a single product.
      *
      * @param BehavioralMetricInterface $metric Raw metrics DTO.
-     * @param array<string, float|int>  $stats  Global dataset statistics.
+     * @param array<string, float|int>  $stats  Global dataset statistics (max sales, max revenue, etc).
      *
-     * @return array<string, mixed> Calculated data set for database persistence.
+     * @return array<string, mixed> Calculated data set ready for database persistence.
      */
     public function calculateRow(BehavioralMetricInterface $metric, array $stats): array
     {
@@ -140,9 +143,9 @@ class ScoreCalculator
     }
 
     /**
-     * Helper to return a "Zeroed" row structure.
+     * Helper to return a "Zeroed" row structure for penalized products.
      *
-     * @param BehavioralMetricInterface $metric
+     * @param BehavioralMetricInterface $metric The product metric DTO.
      * @param int $freshnessBoost Optional boost value to preserve (default 0).
      * @return array<string, mixed>
      */
@@ -168,7 +171,7 @@ class ScoreCalculator
      * @param BehavioralMetricInterface $metric
      * @param array<string, float|int> $stats
      * @param array<string, mixed> $storeConfig Memoized store configuration.
-     * @return float
+     * @return float Calculated performance score before constraints.
      */
     private function calculatePerformanceScore(
         BehavioralMetricInterface $metric,
@@ -262,7 +265,7 @@ class ScoreCalculator
      * @param int $clicks
      * @param float $globalCtr
      * @param float $maxPenalty
-     * @return float
+     * @return float Calculated penalty to subtract.
      */
     private function calculateProgressivePenalty(int $views, int $clicks, float $globalCtr, float $maxPenalty): float
     {
@@ -287,7 +290,7 @@ class ScoreCalculator
      * @param float $performanceScore
      * @param int $productId
      * @param array<string, mixed> $storeConfig
-     * @return float
+     * @return float Final blended score.
      */
     private function applyShuffleLogic(float $performanceScore, int $productId, array $storeConfig): float
     {
@@ -303,13 +306,14 @@ class ScoreCalculator
 
     /**
      * Calculate Boost based on "News From Date" (Priority) OR "Created At".
+     * Decay is calculated relative to the system's current time.
      *
      * @param string|null $createdAt
      * @param string|null $newsFromDate
      * @param int $pid
      * @param int $storeId
      * @param array<string, mixed> $storeConfig
-     * @return int
+     * @return int Boost value from 0 to 100.
      */
     private function calculateFreshnessBoost(
         ?string $createdAt,
@@ -351,7 +355,6 @@ class ScoreCalculator
             // 2. Fallback: Check "Created At"
             if ($createdAt !== null) {
                 $createdDate = new \DateTimeImmutable($createdAt, new \DateTimeZone(self::TIMEZONE_UTC));
-
                 $diffDays = (int)$now->diff($createdDate)->days;
 
                 if ($diffDays < $duration) {
@@ -374,7 +377,7 @@ class ScoreCalculator
      * Prevents O(N) configuration lookups during massive catalog processing.
      *
      * @param int $storeId
-     * @return array<string, mixed>
+     * @return array<string, mixed> Configuration metrics.
      */
     private function getStoreConfig(int $storeId): array
     {
@@ -394,8 +397,8 @@ class ScoreCalculator
     }
 
     /**
-     * Retrieves a single memoized "Now" DateTime object per store.
-     * Prevents instantiating 100,000+ objects per cron run.
+     * Retrieves a single memoized "Now" DateTime object per store using TimezoneInterface.
+     * Prevents instantiating 100,000+ date objects per cron run while remaining mockable.
      *
      * @param int $storeId
      * @return \DateTimeImmutable
@@ -403,7 +406,11 @@ class ScoreCalculator
     private function getNowReference(int $storeId): \DateTimeImmutable
     {
         if (!isset($this->nowCache[$storeId])) {
-            $this->nowCache[$storeId] = new \DateTimeImmutable(self::DATETIME_NOW, new \DateTimeZone(self::TIMEZONE_UTC));
+            // Retrieve current time in UTC (false flag prevents timezone conversion)
+            $nowMutable = $this->timezone->date(null, null, false);
+
+            // Convert to immutable to prevent accidental mutation across the loop
+            $this->nowCache[$storeId] = \DateTimeImmutable::createFromMutable($nowMutable);
         }
 
         return $this->nowCache[$storeId];
