@@ -126,15 +126,16 @@ class ScoreCalculator
         }
 
         return [
-            BehavioralMetricInterface::PRODUCT_ID   => $pid,
-            BehavioralMetricInterface::STORE_ID     => $storeId,
-            BehavioralMetricInterface::RAW_SALES    => $metric->getRawSales(),
-            BehavioralMetricInterface::RAW_REVENUE  => $metric->getRawRevenue(),
-            BehavioralMetricInterface::RAW_VIEWS    => $metric->getRawViews(),
-            BehavioralMetricInterface::RAW_CLICKS   => $metric->getRawClicks(),
-            BehavioralMetricInterface::RATING_SCORE => $metric->getRatingSummary(),
-            BehavioralMetricInterface::GLOBAL_SCORE => (int)max(self::MIN_SCORE, min(self::MAX_SCORE, $finalScore)),
-            BehavioralMetricInterface::IS_NEW_BOOST => $freshnessBoost,
+            BehavioralMetricInterface::PRODUCT_ID       => $pid,
+            BehavioralMetricInterface::STORE_ID         => $storeId,
+            BehavioralMetricInterface::RAW_SALES        => $metric->getRawSales(),
+            BehavioralMetricInterface::RAW_REVENUE      => $metric->getRawRevenue(),
+            BehavioralMetricInterface::RAW_VIEWS        => $metric->getRawViews(),
+            BehavioralMetricInterface::RAW_CLICKS       => $metric->getRawClicks(),
+            BehavioralMetricInterface::RAW_ADD_TO_CARTS => $metric->getRawAddToCarts(),
+            BehavioralMetricInterface::RATING_SCORE     => $metric->getRatingSummary(),
+            BehavioralMetricInterface::GLOBAL_SCORE     => (int)max(self::MIN_SCORE, min(self::MAX_SCORE, $finalScore)),
+            BehavioralMetricInterface::IS_NEW_BOOST     => $freshnessBoost,
         ];
     }
 
@@ -148,15 +149,16 @@ class ScoreCalculator
     private function getZeroScoreRow(BehavioralMetricInterface $metric, int $freshnessBoost = self::MIN_SCORE): array
     {
         return [
-            BehavioralMetricInterface::PRODUCT_ID   => $metric->getProductId(),
-            BehavioralMetricInterface::STORE_ID     => $metric->getStoreId(),
-            BehavioralMetricInterface::RAW_SALES    => $metric->getRawSales(),
-            BehavioralMetricInterface::RAW_REVENUE  => $metric->getRawRevenue(),
-            BehavioralMetricInterface::RAW_VIEWS    => $metric->getRawViews(),
-            BehavioralMetricInterface::RAW_CLICKS   => $metric->getRawClicks(),
-            BehavioralMetricInterface::RATING_SCORE => $metric->getRatingSummary(),
-            BehavioralMetricInterface::GLOBAL_SCORE => self::MIN_SCORE,
-            BehavioralMetricInterface::IS_NEW_BOOST => $freshnessBoost,
+            BehavioralMetricInterface::PRODUCT_ID       => $metric->getProductId(),
+            BehavioralMetricInterface::STORE_ID         => $metric->getStoreId(),
+            BehavioralMetricInterface::RAW_SALES        => $metric->getRawSales(),
+            BehavioralMetricInterface::RAW_REVENUE      => $metric->getRawRevenue(),
+            BehavioralMetricInterface::RAW_VIEWS        => $metric->getRawViews(),
+            BehavioralMetricInterface::RAW_CLICKS       => $metric->getRawClicks(),
+            BehavioralMetricInterface::RAW_ADD_TO_CARTS => $metric->getRawAddToCarts(),
+            BehavioralMetricInterface::RATING_SCORE     => $metric->getRatingSummary(),
+            BehavioralMetricInterface::GLOBAL_SCORE     => self::MIN_SCORE,
+            BehavioralMetricInterface::IS_NEW_BOOST     => $freshnessBoost,
         ];
     }
 
