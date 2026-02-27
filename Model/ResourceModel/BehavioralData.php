@@ -5,8 +5,6 @@
  * @category  Amadeco
  * @package   Amadeco_ElasticSuiteBehavioral
  * @author    Amadeco Core Team
- * @copyright Copyright (c) 2026 Amadeco
- * @license   Open Software License (OSL 3.0)
  */
 
 declare(strict_types=1);
@@ -20,6 +18,7 @@ use Amadeco\ElasticSuiteBehavioral\Model\ResourceModel\Data\StockStatusResolver;
 use Amadeco\ElasticSuiteBehavioral\Model\ResourceModel\Data\TrackerDataCollector;
 use Magento\Catalog\Model\Product;
 use Magento\Eav\Model\Config as EavConfig;
+use Magento\Eav\Model\Entity\Attribute\AbstractAttribute;
 use Magento\Framework\App\ResourceConnection;
 use Magento\Framework\DB\Adapter\AdapterInterface;
 use Magento\Framework\DB\Select;
@@ -35,7 +34,7 @@ use Psr\Log\LoggerInterface;
  * 2. Stock status from MSI/Legacy tables (via StockStatusResolver).
  * 3. Transactional data (Sales, Reviews) from MySQL.
  *
- * It yields a Generator of hydrated DTOs to ensure O(1) memory usage during processing.
+ * Implements chunked Generators to ensure O(1) memory usage in both PHP and MySQL PDO buffers.
  */
 class BehavioralData
 {
@@ -44,7 +43,6 @@ class BehavioralData
      */
     public const string TABLE_BEHAVIORAL_ANALYSIS = 'behavioral_analysis';
     public const string TABLE_CATALOG_PRODUCT = 'catalog_product_entity';
-    public const string TABLE_CATALOG_PRODUCT_SUPER_LINK = 'catalog_product_super_link';
     public const string TABLE_SALES_ORDER_ITEM = 'sales_order_item';
     public const string TABLE_REVIEW_SUMMARY = 'review_entity_summary';
 
@@ -60,13 +58,16 @@ class BehavioralData
     /**
      * Processing Constants
      */
-    private const int DB_BATCH_SIZE = 1000;
+    private const int DB_INSERT_BATCH_SIZE = 1000;
+    private const int DB_SELECT_CHUNK_SIZE = 5000; // Prevents PDO buffer overflow
     private const string ATTR_DISCONTINUED = 'discontinued';
 
     /**
-     * @var array<string, int|null> Local cache to prevent repetitive EAV attribute lookups.
+     * SQL Expression Fallbacks
      */
-    private array $attributeIdCache = [];
+    private const string SQL_EXPR_TRUE = '1';
+    private const string SQL_EXPR_FALSE = '0';
+    private const string SQL_EXPR_NULL = 'NULL';
 
     /**
      * @param ResourceConnection $resource
@@ -75,8 +76,8 @@ class BehavioralData
      * @param BehavioralMetricInterfaceFactory $metricFactory
      * @param EavConfig $eavConfig
      * @param LoggerInterface $logger
-     * @param StockStatusResolver $stockResolver Service for resolving MSI/Legacy stock logic.
-     * @param TrackerDataCollector $trackerCollector Service for fetching ES engagement data.
+     * @param StockStatusResolver $stockResolver
+     * @param TrackerDataCollector $trackerCollector
      */
     public function __construct(
         private readonly ResourceConnection $resource,
@@ -101,22 +102,12 @@ class BehavioralData
     {
         $startDate = $this->getDateThreshold($periodDays);
 
-        // 1. Fetch ElasticSearch Engagement Data (Views, Clicks, ATC)
+        // 1. Fetch ElasticSearch Engagement Data maps (Memory efficient key-value pairs)
         $impressionData = $this->trackerCollector->collect($storeId, $startDate, self::ES_FIELD_IMPRESSION);
-        $pdpViewData = $this->trackerCollector->collect(
-            $storeId,
-            $startDate,
-            self::ES_FIELD_PDP_VIEW,
-            self::ES_EVENT_VIEW
-        );
-        $atcData = $this->trackerCollector->collect(
-            $storeId,
-            $startDate,
-            self::ES_FIELD_ADD_TO_CART,
-            self::ES_EVENT_ATC
-        );
+        $pdpViewData = $this->trackerCollector->collect($storeId, $startDate, self::ES_FIELD_PDP_VIEW, self::ES_EVENT_VIEW);
+        $atcData = $this->trackerCollector->collect($storeId, $startDate, self::ES_FIELD_ADD_TO_CART, self::ES_EVENT_ATC);
 
-        // 2. Stream Database Data via Generator and Merge with ES Data
+        // 2. Stream Database Data via Chunked Generator
         yield from $this->getDataForStoreGenerator(
             $storeId,
             $startDate,
@@ -153,7 +144,7 @@ class BehavioralData
             BehavioralMetricInterface::UPDATED_AT,
         ];
 
-        foreach (array_chunk($rows, self::DB_BATCH_SIZE) as $chunk) {
+        foreach (array_chunk($rows, self::DB_INSERT_BATCH_SIZE) as $chunk) {
             $connection->insertOnDuplicate($tableName, $chunk, $updateFields);
         }
     }
@@ -179,18 +170,21 @@ class BehavioralData
                 ]
             )
             ->where('created_at >= ?', $dateThreshold)
-            ->where('store_id = ?', $storeId);
+            ->where('store_id = ?', $storeId)
+            // Ensure we only count valid finalized sales
+            ->where('parent_item_id IS NULL');
 
         $result = $connection->fetchRow($select);
 
         return [
-            'max_sales'   => (float)($result['max_sales'] ?? 1.0),
-            'max_revenue' => (float)($result['max_revenue'] ?? 1.0),
+            'max_sales'   => (float)($result['max_sales'] ?? Config::DEFAULT_MAX_SALES),
+            'max_revenue' => (float)($result['max_revenue'] ?? Config::DEFAULT_MAX_REVENUE),
         ];
     }
 
     /**
-     * Retrieve global traffic statistics facade.
+     * Retrieve global traffic statistics.
+     * Replaces the hardcoded placeholder with real aggregation.
      *
      * @param int $storeId
      * @param int $periodDays
@@ -198,18 +192,31 @@ class BehavioralData
      */
     public function getGlobalTrafficStats(int $storeId, int $periodDays): array
     {
-        return ['global_clicks' => 0, 'global_views' => 0, 'max_atc' => 50.0];
+        $startDate = $this->getDateThreshold($periodDays);
+
+        // Fetch the raw maps
+        $impressionData = $this->trackerCollector->collect($storeId, $startDate, self::ES_FIELD_IMPRESSION);
+        $pdpViewData = $this->trackerCollector->collect($storeId, $startDate, self::ES_FIELD_PDP_VIEW, self::ES_EVENT_VIEW);
+        $atcData = $this->trackerCollector->collect($storeId, $startDate, self::ES_FIELD_ADD_TO_CART, self::ES_EVENT_ATC);
+
+        return [
+            'global_views'  => (int)array_sum($impressionData),
+            'global_clicks' => (int)array_sum($pdpViewData),
+            'max_atc'       => empty($atcData) ? Config::DEFAULT_MAX_ATC : (float)max($atcData),
+        ];
     }
 
     /**
-     * Internal: SQL Generator that merges SQL data with Elasticsearch maps.
+     * SQL Generator that merges SQL data with Elasticsearch maps.
+     * Uses Cursor-Based Pagination (Keyset Pagination) to prevent PDO memory buffer overflow
+     * and avoid the exponential performance degradation of LIMIT/OFFSET on massive catalogs.
      *
      * @param int $storeId
      * @param string $startDate
-     * @param array $impressionData
-     * @param array $pdpViewData
-     * @param array $atcData
-     * @return \Generator
+     * @param array<int, int> $impressionData
+     * @param array<int, int> $pdpViewData
+     * @param array<int, int> $atcData
+     * @return \Generator<BehavioralMetricInterface>
      */
     private function getDataForStoreGenerator(
         int $storeId,
@@ -221,28 +228,45 @@ class BehavioralData
         $connection = $this->resource->getConnection();
         $select = $this->buildMainQuery($connection, $storeId, $startDate);
 
-        $stmt = $connection->query($select);
+        // Initialize the cursor
+        $lastEntityId = 0;
 
-        while ($row = $stmt->fetch()) {
-            $pid = (int)$row[BehavioralMetricInterface::PRODUCT_ID];
+        do {
+            // Clone the base query and apply the Keyset Pagination
+            $chunkSelect = clone $select;
+            $chunkSelect->where('cpe.entity_id > ?', $lastEntityId);
+            $chunkSelect->limit(self::DB_SELECT_CHUNK_SIZE);
 
-            yield $this->metricFactory->create([
-                'data' => [
-                    BehavioralMetricInterface::PRODUCT_ID       => $pid,
-                    BehavioralMetricInterface::STORE_ID         => $storeId,
-                    BehavioralMetricInterface::RAW_SALES        => (float)($row[BehavioralMetricInterface::RAW_SALES] ?? 0.0),
-                    BehavioralMetricInterface::RAW_REVENUE      => (float)($row[BehavioralMetricInterface::RAW_REVENUE] ?? 0.0),
-                    BehavioralMetricInterface::RAW_VIEWS        => (int)($impressionData[$pid] ?? 0),
-                    BehavioralMetricInterface::RAW_CLICKS       => (int)($pdpViewData[$pid] ?? 0),
-                    BehavioralMetricInterface::RAW_ADD_TO_CARTS => (int)($atcData[$pid] ?? 0),
-                    BehavioralMetricInterface::RATING_SUMMARY   => (int)($row[BehavioralMetricInterface::RATING_SUMMARY] ?? 0),
-                    BehavioralMetricInterface::IS_SALABLE       => (bool)($row[BehavioralMetricInterface::IS_SALABLE] ?? false),
-                    BehavioralMetricInterface::IS_DISCONTINUED  => (bool)($row[BehavioralMetricInterface::IS_DISCONTINUED] ?? false),
-                    BehavioralMetricInterface::CREATED_AT       => $row[BehavioralMetricInterface::CREATED_AT],
-                    BehavioralMetricInterface::NEWS_FROM_DATE   => $row[BehavioralMetricInterface::NEWS_FROM_DATE],
-                ],
-            ]);
-        }
+            $stmt = $connection->query($chunkSelect);
+            $rowCount = 0;
+
+            while ($row = $stmt->fetch()) {
+                $rowCount++;
+                $pid = (int)$row[BehavioralMetricInterface::PRODUCT_ID];
+
+                // Update the cursor to the current highest Entity ID in this chunk
+                $lastEntityId = $pid;
+
+                /** @var \Amadeco\ElasticSuiteBehavioral\Model\BehavioralMetric $metric */
+                $metric = $this->metricFactory->create();
+                $metric->setProductId($pid)
+                    ->setStoreId($storeId)
+                    ->setRawSales((float)($row[BehavioralMetricInterface::RAW_SALES] ?? 0.0))
+                    ->setRawRevenue((float)($row[BehavioralMetricInterface::RAW_REVENUE] ?? 0.0))
+                    ->setRawViews((int)($impressionData[$pid] ?? 0))
+                    ->setRawClicks((int)($pdpViewData[$pid] ?? 0))
+                    ->setRawAddToCarts((int)($atcData[$pid] ?? 0))
+                    ->setRatingSummary((int)($row[BehavioralMetricInterface::RATING_SUMMARY] ?? 0))
+                    ->setIsSalable((bool)($row[BehavioralMetricInterface::IS_SALABLE] ?? false))
+                    ->setIsDiscontinued((bool)($row[BehavioralMetricInterface::IS_DISCONTINUED] ?? false))
+                    ->setCreatedAt($row[BehavioralMetricInterface::CREATED_AT] ?? null)
+                    ->setNewsFromDate($row[BehavioralMetricInterface::NEWS_FROM_DATE] ?? null);
+
+                yield $metric;
+            }
+
+        // Continue looping as long as the chunk returned the maximum allowed rows
+        } while ($rowCount === self::DB_SELECT_CHUNK_SIZE);
     }
 
     /**
@@ -264,42 +288,26 @@ class BehavioralData
                 ]
             );
 
-        // 1. Stock Status
         if ($this->config->isStockCheckEnabled($storeId)) {
             $this->stockResolver->joinStockStatus($select, $storeId);
         } else {
-            $select->columns([BehavioralMetricInterface::IS_SALABLE => new Expression('1')]);
+            $select->columns([BehavioralMetricInterface::IS_SALABLE => new Expression(self::SQL_EXPR_TRUE)]);
         }
 
-        // 2. Discontinued Status
         if ($this->config->isDiscontinuedCheckEnabled($storeId)) {
-            $this->joinAttribute(
-                $select,
-                self::ATTR_DISCONTINUED,
-                $storeId,
-                BehavioralMetricInterface::IS_DISCONTINUED,
-                'int',
-                '0'
-            );
+            $this->joinAttribute($select, self::ATTR_DISCONTINUED, $storeId, BehavioralMetricInterface::IS_DISCONTINUED, self::SQL_EXPR_FALSE);
         } else {
-            $select->columns([BehavioralMetricInterface::IS_DISCONTINUED => new Expression('0')]);
+            $select->columns([BehavioralMetricInterface::IS_DISCONTINUED => new Expression(self::SQL_EXPR_FALSE)]);
         }
 
-        // 3. News From Date
-        $this->joinAttribute(
-            $select,
-            BehavioralMetricInterface::NEWS_FROM_DATE,
-            $storeId,
-            BehavioralMetricInterface::NEWS_FROM_DATE,
-            'datetime',
-            'NULL'
-        );
+        $this->joinAttribute($select, BehavioralMetricInterface::NEWS_FROM_DATE, $storeId, BehavioralMetricInterface::NEWS_FROM_DATE, self::SQL_EXPR_NULL);
 
-        // 4. Sales Data (Secure chaining of quoteInto)
-        $salesJoinCond = $connection->quoteInto(
-            'soi.product_id = cpe.entity_id AND soi.parent_item_id IS NULL AND soi.store_id = ?',
-            $storeId
-        ) . $connection->quoteInto(' AND soi.created_at >= ?', $startDate);
+        $salesJoinCond = implode(' AND ', [
+            'soi.product_id = cpe.entity_id',
+            'soi.parent_item_id IS NULL',
+            $connection->quoteInto('soi.store_id = ?', $storeId),
+            $connection->quoteInto('soi.created_at >= ?', $startDate)
+        ]);
 
         $select->joinLeft(
             ['soi' => $this->resource->getTableName(self::TABLE_SALES_ORDER_ITEM)],
@@ -310,7 +318,6 @@ class BehavioralData
             ]
         );
 
-        // 5. Review Data
         $select->joinLeft(
             ['res' => $this->resource->getTableName(self::TABLE_REVIEW_SUMMARY)],
             $connection->quoteInto('res.entity_pk_value = cpe.entity_id AND res.store_id = ?', $storeId),
@@ -320,46 +327,38 @@ class BehavioralData
         );
 
         $select->group('cpe.entity_id');
+        // Critical for reliable Keyset pagination to ensure rows are ordered deterministically
+        $select->order('cpe.entity_id ASC');
 
         return $select;
     }
 
     /**
-     * DRY Helper to join EAV attribute values safely.
-     *
-     * Uses strict quoteIdentifier for aliases and separated quoteInto calls
-     * to prevent SQL Injection and binding errors.
+     * DRY Helper to join EAV attribute values safely utilizing native Backend Tables.
      *
      * @param Select $select
      * @param string $code
      * @param int $storeId
      * @param string $alias
-     * @param string $suffix
      * @param string $default
      * @return void
      */
-    private function joinAttribute(
-        Select $select,
-        string $code,
-        int $storeId,
-        string $alias,
-        string $suffix,
-        string $default
-    ): void {
-        $attrId = $this->getAttributeId($code);
-        if (!$attrId) {
+    private function joinAttribute(Select $select, string $code, int $storeId, string $alias, string $default): void
+    {
+        $attribute = $this->getAttributeSafely($code);
+
+        if (!$attribute || !$attribute->getId()) {
             $select->columns([$alias => new Expression($default)]);
             return;
         }
 
         $connection = $select->getAdapter();
-        $table = $this->resource->getTableName("catalog_product_entity_$suffix");
+        $table = $attribute->getBackendTable();
+        $attrId = (int)$attribute->getId();
 
-        // Secure Identifiers for Aliases
         $defAlias = $connection->quoteIdentifier("attr_{$alias}_def");
         $storeAlias = $connection->quoteIdentifier("attr_{$alias}_store");
 
-        // Join Global (Store 0)
         $defConditions = implode(' AND ', [
             "{$defAlias}.entity_id = cpe.entity_id",
             $connection->quoteInto("{$defAlias}.attribute_id = ?", $attrId),
@@ -368,7 +367,6 @@ class BehavioralData
 
         $select->joinLeft(["attr_{$alias}_def" => $table], $defConditions, []);
 
-        // Join Store View (Store ID)
         $storeConditions = implode(' AND ', [
             "{$storeAlias}.entity_id = cpe.entity_id",
             $connection->quoteInto("{$storeAlias}.attribute_id = ?", $attrId),
@@ -385,27 +383,23 @@ class BehavioralData
     }
 
     /**
-     * Efficiently resolve Attribute ID by Code using local cache.
+     * Safely load the EAV attribute utilizing Magento's native EAV cache.
      *
      * @param string $code
-     * @return int|null
+     * @return AbstractAttribute|null
      */
-    private function getAttributeId(string $code): ?int
+    private function getAttributeSafely(string $code): ?AbstractAttribute
     {
-        if (!array_key_exists($code, $this->attributeIdCache)) {
-            try {
-                $attribute = $this->eavConfig->getAttribute(Product::ENTITY, $code);
-                $this->attributeIdCache[$code] = $attribute->getId() ? (int)$attribute->getId() : null;
-            } catch (\Exception $e) {
-                $this->logger->warning("Amadeco Behavioral: Missing attribute '$code'.");
-                $this->attributeIdCache[$code] = null;
-            }
+        try {
+            return $this->eavConfig->getAttribute(Product::ENTITY, $code);
+        } catch (\Exception $e) {
+            $this->logger->warning("Amadeco Behavioral: Missing attribute '$code'.");
+            return null;
         }
-        return $this->attributeIdCache[$code];
     }
 
     /**
-     * Helper to format date threshold.
+     * Helper to format database-compatible UTC date threshold.
      *
      * @param int $days
      * @return string
