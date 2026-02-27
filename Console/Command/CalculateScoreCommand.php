@@ -11,6 +11,7 @@ declare(strict_types=1);
 namespace Amadeco\ElasticSuiteBehavioral\Console\Command;
 
 use Amadeco\ElasticSuiteBehavioral\Api\BehavioralServiceInterface;
+use Amadeco\ElasticSuiteBehavioral\Model\Config;
 use Magento\Framework\App\Area;
 use Magento\Framework\App\State;
 use Magento\Framework\Console\Cli;
@@ -33,10 +34,12 @@ class CalculateScoreCommand extends Command
     private const COMMAND_NAME = 'behavioral:calculate';
 
     /**
+     * @param Config $config
      * @param BehavioralServiceInterface $service Service contract for business logic.
      * @param State                      $state   App state to emulate admin scope.
      */
     public function __construct(
+        private readonly Config $config,
         private readonly BehavioralServiceInterface $service,
         private readonly State $state
     ) {
@@ -70,6 +73,15 @@ class CalculateScoreCommand extends Command
                 $this->state->setAreaCode(Area::AREA_ADMINHTML);
             } catch (LocalizedException $e) {
                 // Area code is already set; proceed safely.
+            }
+
+            if (!$this->config->isEnabled()) {
+                $output->writeln('<comment>Behavioral Analysis is disabled in configuration.</comment>');
+                return Cli::RETURN_SUCCESS;
+            }
+
+            if (!$this->config->isTrackerEnabled()) {
+                $output->writeln('<comment>Warning: ElasticSuite Tracker is disabled. Engagement metrics will be 0.</comment>');
             }
 
             $output->writeln('<info>Starting Behavioral Analysis...</info>');
@@ -110,7 +122,7 @@ This process will:
 1. Aggregate View and Click data from ElasticSuite Tracker.
 2. Aggregate Sales and Revenue data from Magento Sales.
 3. Calculate a normalized score (0-100) based on configured weights.
-4. Update the 'behavioral_score' attribute for all products.
+4. Update the 'behavioral_score' attribute for all products (Only in ElasticSearch, not database).
 5. Invalidate the 'catalog_product' index to reflect changes.
 
 <comment>Note:</comment> This operation can be resource-intensive on large catalogs.
