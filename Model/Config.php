@@ -67,7 +67,7 @@ final class Config
      * Default Values for general and anti-echo settings.
      */
     public const int DEFAULT_ANALYSIS_PERIOD = 60;
-    public const float DEFAULT_CTR_CEILING = 15.0;
+    public const float DEFAULT_CTR_CEILING = 5.0;
     public const int DEFAULT_CONFIDENCE_THRESHOLD = 50;
     public const int DEFAULT_FRESHNESS_DURATION = 30;
     public const int DEFAULT_SHUFFLE_WEIGHT = 2;
@@ -80,13 +80,13 @@ final class Config
     public const float DEFAULT_W_SALES = 1.0;
     public const float DEFAULT_W_REVENUE = 1.0;
     public const float DEFAULT_W_RATING = 0.5;
-    public const float DEFAULT_W_BOUNCE = 10.0;
+    public const float DEFAULT_W_BOUNCE = 20.0;
 
     /**
      * Minimum views required before the bounce penalty is considered.
      * @var int
      */
-    public const int THRESHOLD_BOUNCE_VIEWS = 50;
+    public const int THRESHOLD_BOUNCE_VIEWS = 100;
 
     /**
      * Minimum sales required to avoid being considered a "bounce".
