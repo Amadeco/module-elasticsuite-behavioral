@@ -13,6 +13,8 @@ namespace Amadeco\ElasticSuiteBehavioral\Model\ResourceModel;
 
 use Amadeco\ElasticSuiteBehavioral\Api\Data\BehavioralMetricInterface;
 use Amadeco\ElasticSuiteBehavioral\Api\Data\BehavioralMetricInterfaceFactory;
+use Amadeco\ElasticSuiteBehavioral\Api\Data\TrackerDataBagInterface;
+use Amadeco\ElasticSuiteBehavioral\Api\Data\TrackerDataBagInterfaceFactory;
 use Amadeco\ElasticSuiteBehavioral\Model\Config;
 use Amadeco\ElasticSuiteBehavioral\Model\ResourceModel\Data\StockStatusResolver;
 use Amadeco\ElasticSuiteBehavioral\Model\ResourceModel\Data\TrackerDataCollector;
@@ -79,6 +81,7 @@ class BehavioralData
      * @param LoggerInterface $logger
      * @param StockStatusResolver $stockResolver
      * @param TrackerDataCollector $trackerCollector
+     * @param TrackerDataBagInterfaceFactory $trackerDataBagFactory
      */
     public function __construct(
         private readonly ResourceConnection $resource,
@@ -88,33 +91,64 @@ class BehavioralData
         private readonly EavConfig $eavConfig,
         private readonly LoggerInterface $logger,
         private readonly StockStatusResolver $stockResolver,
-        private readonly TrackerDataCollector $trackerCollector
+        private readonly TrackerDataCollector $trackerCollector,
+        private readonly TrackerDataBagInterfaceFactory $trackerDataBagFactory
     ) {
     }
 
     /**
-     * Orchestrates fetching of all metrics and yields fully hydrated DTOs.
+     * Retrieve global traffic statistics and raw metric maps from Elasticsearch in one pass.
+     * Prevents H-03 Double Aggregation issue.
      *
      * @param int $storeId
      * @param int $periodDays
-     * @return \Generator<BehavioralMetricInterface>
+     * @return TrackerDataBagInterface
      */
-    public function collectAggregatedDataGenerator(int $storeId, int $periodDays): \Generator
+    public function getTrackerDataBag(int $storeId, int $periodDays): TrackerDataBagInterface
     {
         $startDate = $this->getDateThreshold($periodDays);
 
-        // 1. Fetch ElasticSearch Engagement Data maps (Memory efficient key-value pairs)
+        // 1. Fetch ElasticSearch Engagement Data maps ONCE
         $impressionData = $this->trackerCollector->collect($storeId, $startDate, self::ES_FIELD_IMPRESSION);
         $pdpViewData = $this->trackerCollector->collect($storeId, $startDate, self::ES_FIELD_PDP_VIEW, self::ES_EVENT_VIEW);
         $atcData = $this->trackerCollector->collect($storeId, $startDate, self::ES_FIELD_ADD_TO_CART, self::ES_EVENT_ATC);
 
-        // 2. Stream Database Data via Chunked Generator
+        // 2. Hydrate DTO via Factory (Respecting Service Contracts)
+        /** @var TrackerDataBagInterface $dataBag */
+        $dataBag = $this->trackerDataBagFactory->create();
+
+        $dataBag->setImpressions($impressionData)
+                ->setViews($pdpViewData)
+                ->setAtcs($atcData)
+                ->setGlobalViews((int)array_sum($impressionData))
+                ->setGlobalClicks((int)array_sum($pdpViewData))
+                ->setMaxAtc(empty($atcData) ? Config::DEFAULT_MAX_ATC : (float)max($atcData));
+
+        return $dataBag;
+    }
+
+    /**
+     * Orchestrates fetching of all DB metrics and yields fully hydrated DTOs.
+     *
+     * @param int $storeId
+     * @param int $periodDays
+     * @param TrackerDataBagInterface $dataBag
+     * @return \Generator<BehavioralMetricInterface>
+     */
+    public function collectAggregatedDataGenerator(
+        int $storeId,
+        int $periodDays,
+        TrackerDataBagInterface $dataBag
+    ): \Generator {
+        $startDate = $this->getDateThreshold($periodDays);
+
+        // Stream Database Data via Chunked Generator using the injected DTO maps
         yield from $this->getDataForStoreGenerator(
             $storeId,
             $startDate,
-            $impressionData,
-            $pdpViewData,
-            $atcData
+            $dataBag->getImpressions(),
+            $dataBag->getViews(),
+            $dataBag->getAtcs()
         );
     }
 
