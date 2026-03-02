@@ -111,25 +111,32 @@ final class BehavioralService implements BehavioralServiceInterface
      */
     private function processStore(int $storeId, int $period): int
     {
-        // 1. Fetch Global Baselines (Ceilings & Averages)
-        // These are static for the duration of this store's processing to prevent "Drifting Average".
+        // 1. Fetch Global Baselines (Ceilings) from MySQL
         $storeCeilings = $this->resourceModel->getStoreCeilings($storeId, $period);
-        $trafficStats  = $this->resourceModel->getGlobalTrafficStats($storeId, $period);
+
+        // 2. Fetch Elasticsearch Data ONCE via DTO Contract
+        $trackerData = $this->resourceModel->getTrackerDataBag($storeId, $period);
 
         // Calculate a stable Global Average CTR for this store
-        // Prevent division by zero if store has no traffic
-        $globalAverageCtr = $trafficStats['global_views'] > 0
-            ? $trafficStats['global_clicks'] / $trafficStats['global_views']
+        $globalAverageCtr = $trackerData->getGlobalViews() > 0
+            ? $trackerData->getGlobalClicks() / $trackerData->getGlobalViews()
             : self::DEFAULT_FALLBACK_CTR;
 
         // Merge stats for the Calculator
-        $stats = array_merge($storeCeilings, $trafficStats, ['global_average_ctr' => $globalAverageCtr]);
+        $stats = array_merge($storeCeilings, [
+            'global_views'       => $trackerData->getGlobalViews(),
+            'global_clicks'      => $trackerData->getGlobalClicks(),
+            'max_atc'            => $trackerData->getMaxAtc(),
+            'global_average_ctr' => $globalAverageCtr
+        ]);
 
         $batch = [];
         $count = 0;
 
-        // 2. Stream Data & Process Batches via Generator
-        foreach ($this->resourceModel->collectAggregatedDataGenerator($storeId, $period) as $metric) {
+        // 3. Stream Data & Process Batches via Generator (Passing the DTO)
+        $generator = $this->resourceModel->collectAggregatedDataGenerator($storeId, $period, $trackerData);
+
+        foreach ($generator as $metric) {
             $batch[] = $metric;
 
             if (count($batch) >= self::BATCH_SIZE) {
@@ -139,7 +146,6 @@ final class BehavioralService implements BehavioralServiceInterface
             }
         }
 
-        // Process any remaining records in the final incomplete batch
         if (!empty($batch)) {
             $this->processMetricsBatch($batch, $stats);
             $count += count($batch);
