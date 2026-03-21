@@ -15,58 +15,88 @@ namespace Amadeco\ElasticSuiteBehavioral\Model\Calculator;
 
 use Amadeco\ElasticSuiteBehavioral\Api\Data\BehavioralMetricInterface;
 use Amadeco\ElasticSuiteBehavioral\Model\Config;
+use Magento\Framework\Stdlib\DateTime\TimezoneInterface;
 use Psr\Log\LoggerInterface;
 
 /**
- * Class ScoreCalculator
- *
  * Pure business logic engine responsible for calculating normalized behavioral scores.
- * Enhanced with granular debug logging for algorithm transparency.
+ *
+ * Optimized for high-throughput (O(1) memory) by caching store-level configurations
+ * and preventing repetitive object instantiations inside the calculation loops.
+ * Adheres strictly to SRP by delegating specific mathematical concepts to specialized classes.
  */
 class ScoreCalculator
 {
     /**
-     * Sensitivity factor for the bounce penalty.
+     * Mathematical boundaries for the scoring algorithm.
      */
-    private const float BOUNCE_SENSITIVITY = 0.2;
+    private const int MAX_SCORE = 100;
+    private const int MIN_SCORE = 0;
 
+    /**
+     * Date processing constants.
+     */
+    private const string TIMEZONE_UTC = 'UTC';
+
+    /**
+     * @var array<int, array<string, mixed>> L1 Cache for store-level configurations to prevent O(N) lookups.
+     */
+    private array $storeConfigCache = [];
+
+    /**
+     * @var array<int, \DateTimeImmutable> L1 Cache for the "Now" reference per store.
+     */
+    private array $nowCache = [];
+
+    /**
+     * @param BayesianSmoother $smoother Handles logarithmic normalization and Bayesian averages.
+     * @param Config $config Module configuration provider.
+     * @param ShuffleCalculator $shuffleCalculator Handles the Anti-Echo deterministic randomization.
+     * @param TimezoneInterface $timezone Manages chronological state (Injected for testability).
+     * @param LoggerInterface $logger Handles debug output.
+     */
     public function __construct(
         private readonly BayesianSmoother $smoother,
         private readonly Config $config,
         private readonly ShuffleCalculator $shuffleCalculator,
+        private readonly TimezoneInterface $timezone,
         private readonly LoggerInterface $logger
     ) {
     }
 
     /**
-     * Calculate the final score for a single product.
+     * Calculate the final score and formatted row for a single product.
      *
      * @param BehavioralMetricInterface $metric Raw metrics DTO.
-     * @param array                     $stats  Global dataset statistics.
+     * @param array<string, float|int>  $stats  Global dataset statistics (max sales, max revenue, etc).
      *
-     * @return array<string, mixed> Calculated data set for database persistence.
+     * @return array<string, mixed> Calculated data set ready for database persistence.
      */
     public function calculateRow(BehavioralMetricInterface $metric, array $stats): array
     {
         $pid = $metric->getProductId();
         $storeId = $metric->getStoreId();
 
+        // Ensure configuration is loaded into local memory for this store
+        $storeConfig = $this->getStoreConfig($storeId);
+
         // 1. Calculate Freshness Boost (Smart Freshness)
         $freshnessBoost = $this->calculateFreshnessBoost(
             $metric->getCreatedAt(),
             $metric->getNewsFromDate(),
             $pid,
-            $storeId
+            $storeId,
+            $storeConfig
         );
 
         // --- 2. THE AVAILABILITY GATE ---
 
         // Rule A: Stock Check
         if (!$metric->isSalable()) {
-            $isComingSoon = $this->config->isComingSoonBoostEnabled($storeId);
-            $allowedFreshness = $isComingSoon ? $freshnessBoost : 0;
+            $isComingSoon = (bool)($storeConfig['is_coming_soon'] ?? false);
+            $allowedFreshness = $isComingSoon ? $freshnessBoost : self::MIN_SCORE;
 
-            if ($this->shouldLog($storeId)) {
+            if ($storeConfig['is_debug']) {
                 $this->log($storeId, $pid, "GATE: Blocked by Out of Stock.", [
                     'coming_soon_enabled' => $isComingSoon,
                     'freshness_preserved' => $allowedFreshness,
@@ -78,19 +108,19 @@ class ScoreCalculator
 
         // Rule B: Discontinued Check
         if ($metric->isDiscontinued()) {
-            if ($this->shouldLog($storeId)) {
+            if ($storeConfig['is_debug']) {
                 $this->log($storeId, $pid, "GATE: Blocked by Discontinued Flag.");
             }
-            return $this->getZeroScoreRow($metric, 0);
+            return $this->getZeroScoreRow($metric, self::MIN_SCORE);
         }
 
         // --- 3. Performance Logic (For Salable Items) ---
-        $performanceScore = $this->calculatePerformanceScore($metric, $stats);
+        $performanceScore = $this->calculatePerformanceScore($metric, $stats, $storeConfig);
 
         // --- 4. Discovery Shuffle ---
-        $finalScore = $this->applyShuffleLogic($performanceScore, $pid);
+        $finalScore = $this->applyShuffleLogic($performanceScore, $pid, $storeConfig);
 
-        if ($this->shouldLog($storeId)) {
+        if ($storeConfig['is_debug']) {
             $this->log($storeId, $pid, "FINAL: Calculation Complete.", [
                 'base_perf' => round($performanceScore, 2),
                 'final'     => (int)$finalScore,
@@ -99,37 +129,39 @@ class ScoreCalculator
         }
 
         return [
-            BehavioralMetricInterface::PRODUCT_ID   => $pid,
-            BehavioralMetricInterface::STORE_ID     => $storeId,
-            BehavioralMetricInterface::RAW_SALES    => $metric->getRawSales(),
-            BehavioralMetricInterface::RAW_REVENUE  => $metric->getRawRevenue(),
-            BehavioralMetricInterface::RAW_VIEWS    => $metric->getRawViews(),
-            BehavioralMetricInterface::RAW_CLICKS   => $metric->getRawClicks(),
-            BehavioralMetricInterface::RATING_SCORE => $metric->getRatingSummary(),
-            BehavioralMetricInterface::GLOBAL_SCORE => (int)max(0, min(100, $finalScore)),
-            BehavioralMetricInterface::IS_NEW_BOOST => $freshnessBoost,
+            BehavioralMetricInterface::PRODUCT_ID       => $pid,
+            BehavioralMetricInterface::STORE_ID         => $storeId,
+            BehavioralMetricInterface::RAW_SALES        => $metric->getRawSales(),
+            BehavioralMetricInterface::RAW_REVENUE      => $metric->getRawRevenue(),
+            BehavioralMetricInterface::RAW_VIEWS        => $metric->getRawViews(),
+            BehavioralMetricInterface::RAW_CLICKS       => $metric->getRawClicks(),
+            BehavioralMetricInterface::RAW_ADD_TO_CARTS => $metric->getRawAddToCarts(),
+            BehavioralMetricInterface::RATING_SCORE     => $metric->getRatingSummary(),
+            BehavioralMetricInterface::GLOBAL_SCORE     => (int)max(self::MIN_SCORE, min(self::MAX_SCORE, $finalScore)),
+            BehavioralMetricInterface::IS_NEW_BOOST     => $freshnessBoost,
         ];
     }
 
     /**
-     * Helper to return a "Zeroed" row structure.
+     * Helper to return a "Zeroed" row structure for penalized products.
      *
-     * @param BehavioralMetricInterface $metric
-     * @param int                       $freshnessBoost Optional boost value to preserve (default 0).
+     * @param BehavioralMetricInterface $metric The product metric DTO.
+     * @param int $freshnessBoost Optional boost value to preserve (default 0).
      * @return array<string, mixed>
      */
-    private function getZeroScoreRow(BehavioralMetricInterface $metric, int $freshnessBoost = 0): array
+    private function getZeroScoreRow(BehavioralMetricInterface $metric, int $freshnessBoost = self::MIN_SCORE): array
     {
         return [
-            BehavioralMetricInterface::PRODUCT_ID   => $metric->getProductId(),
-            BehavioralMetricInterface::STORE_ID     => $metric->getStoreId(),
-            BehavioralMetricInterface::RAW_SALES    => $metric->getRawSales(),
-            BehavioralMetricInterface::RAW_REVENUE  => $metric->getRawRevenue(),
-            BehavioralMetricInterface::RAW_VIEWS    => $metric->getRawViews(),
-            BehavioralMetricInterface::RAW_CLICKS   => $metric->getRawClicks(),
-            BehavioralMetricInterface::RATING_SCORE => $metric->getRatingSummary(),
-            BehavioralMetricInterface::GLOBAL_SCORE => 0,
-            BehavioralMetricInterface::IS_NEW_BOOST => $freshnessBoost,
+            BehavioralMetricInterface::PRODUCT_ID       => $metric->getProductId(),
+            BehavioralMetricInterface::STORE_ID         => $metric->getStoreId(),
+            BehavioralMetricInterface::RAW_SALES        => $metric->getRawSales(),
+            BehavioralMetricInterface::RAW_REVENUE      => $metric->getRawRevenue(),
+            BehavioralMetricInterface::RAW_VIEWS        => $metric->getRawViews(),
+            BehavioralMetricInterface::RAW_CLICKS       => $metric->getRawClicks(),
+            BehavioralMetricInterface::RAW_ADD_TO_CARTS => $metric->getRawAddToCarts(),
+            BehavioralMetricInterface::RATING_SCORE     => $metric->getRatingSummary(),
+            BehavioralMetricInterface::GLOBAL_SCORE     => self::MIN_SCORE,
+            BehavioralMetricInterface::IS_NEW_BOOST     => $freshnessBoost,
         ];
     }
 
@@ -137,55 +169,55 @@ class ScoreCalculator
      * Computes the raw performance score based on weighted metrics and progressive penalties.
      *
      * @param BehavioralMetricInterface $metric
-     * @param array                     $stats
-     * @return float
+     * @param array<string, float|int> $stats
+     * @param array<string, mixed> $storeConfig Memoized store configuration.
+     * @return float Calculated performance score before constraints.
      */
-    private function calculatePerformanceScore(BehavioralMetricInterface $metric, array $stats): float
-    {
-        $storeId = $metric->getStoreId();
+    private function calculatePerformanceScore(
+        BehavioralMetricInterface $metric,
+        array $stats,
+        array $storeConfig
+    ): float {
         $pid = $metric->getProductId();
+        $storeId = $metric->getStoreId();
 
-        $weights = $this->config->getWeights($storeId);
-        $ctrCeiling = $this->config->getCtrNormalizationCeiling($storeId);
-        $globalAverageCtr = (float)($stats['global_average_ctr'] ?? 0.02);
+        /** @var array<string, float> $weights */
+        $weights = $storeConfig['weights'];
+
+        $globalAverageCtr = (float)($stats['global_average_ctr'] ?? Config::DEFAULT_GLOBAL_CTR);
 
         // A. Normalize Hard Conversion Metrics (Logarithmic)
         $scoreSales = $this->smoother->normalizeLogarithmic(
             $metric->getRawSales(),
-            (float)($stats['max_sales'] ?? 1.0)
+            (float)($stats['max_sales'] ?? Config::DEFAULT_MAX_SALES)
         );
         $scoreRevenue = $this->smoother->normalizeLogarithmic(
             $metric->getRawRevenue(),
-            (float)($stats['max_revenue'] ?? 1.0)
+            (float)($stats['max_revenue'] ?? Config::DEFAULT_MAX_REVENUE)
         );
 
         // B. Dynamic CTR Scoring (Bayesian)
         $scoreCtr = 0.0;
         $smoothedCtr = 0.0;
+
         if ($metric->getRawViews() > 0) {
             $smoothedCtr = $this->smoother->getSmoothedCtr(
                 $metric->getRawClicks(),
                 $metric->getRawViews(),
                 $globalAverageCtr,
-                $this->config->getBayesianConfidenceThreshold($storeId)
+                (int)$storeConfig['bayesian_threshold']
             );
-            $scoreCtr = $this->smoother->normalizeLogarithmic($smoothedCtr * 100, $ctrCeiling);
+            $scoreCtr = $this->smoother->normalizeLogarithmic($smoothedCtr * self::MAX_SCORE, (float)$storeConfig['ctr_ceiling']);
         }
 
         // C. Normalize Add to Cart (Logarithmic)
         $scoreAtc = $this->smoother->normalizeLogarithmic(
-            $metric->getRawAddToCarts(),
-            (float)($stats['max_atc'] ?? 50.0)
+            (float)$metric->getRawAddToCarts(),
+            (float)($stats['max_atc'] ?? Config::DEFAULT_MAX_ATC)
         );
 
         // D. Weighted Sum
-        $totalWeight = array_sum([
-            $weights['sales'],
-            $weights['revenue'],
-            $weights['ctr'],
-            $weights['atc'],
-            $weights['rating'],
-        ]);
+        $totalWeight = array_sum($weights);
 
         $weightedSum = ($scoreSales * $weights['sales']) +
                        ($scoreRevenue * $weights['revenue']) +
@@ -193,18 +225,18 @@ class ScoreCalculator
                        ($scoreAtc * $weights['atc']) +
                        ($metric->getRatingSummary() * $weights['rating']);
 
-        $baseScore = $totalWeight > 0 ? ($weightedSum / $totalWeight) : 0.0;
+        // Prevent division by zero if weights are heavily misconfigured in Admin
+        $baseScore = $totalWeight > 0.0 ? ($weightedSum / $totalWeight) : 0.0;
 
         // E. Apply Progressive Penalty
         $penalty = $this->calculateProgressivePenalty(
             $metric->getRawViews(),
             $metric->getRawClicks(),
             $globalAverageCtr,
-            $weights['bounce_penalty']
+            (float)$weights['bounce_penalty']
         );
 
-        // Debug Logging for Performance Breakdown
-        if ($this->shouldLog($storeId)) {
+        if ($storeConfig['is_debug']) {
             $this->log($storeId, $pid, "PERF: Breakdown calculated.", [
                 'inputs' => [
                     'sales' => $metric->getRawSales(),
@@ -218,13 +250,8 @@ class ScoreCalculator
                     'ctr'     => round($scoreCtr, 1),
                     'atc'     => round($scoreAtc, 1),
                 ],
-                'ctr_details' => [
-                    'raw_ctr'      => $metric->getRawViews() > 0 ? $metric->getRawClicks() / $metric->getRawViews() : 0,
-                    'smoothed_ctr' => $smoothedCtr,
-                    'global_avg'   => $globalAverageCtr,
-                ],
-                'penalty_deduction' => $penalty,
                 'pre_penalty_score' => $baseScore,
+                'penalty_deduction' => $penalty,
             ]);
         }
 
@@ -232,22 +259,22 @@ class ScoreCalculator
     }
 
     /**
-     * Calculates a penalty strictly proportional to how bad the CTR is.
+     * Calculates a penalty strictly proportional to how bad the CTR is compared to the global average.
      *
-     * @param int   $views
-     * @param int   $clicks
+     * @param int $views
+     * @param int $clicks
      * @param float $globalCtr
      * @param float $maxPenalty
-     * @return float
+     * @return float Calculated penalty to subtract.
      */
     private function calculateProgressivePenalty(int $views, int $clicks, float $globalCtr, float $maxPenalty): float
     {
-        if ($views <= 0 || $views < Config::THRESHOLD_BOUNCE_VIEWS) {
+        if ($views < Config::THRESHOLD_BOUNCE_VIEWS || $maxPenalty <= 0.0) {
             return 0.0;
         }
 
         $productCtr = $clicks / $views;
-        $failThreshold = $globalCtr * self::BOUNCE_SENSITIVITY;
+        $failThreshold = $globalCtr * Config::BOUNCE_SENSITIVITY;
 
         if ($productCtr >= $failThreshold) {
             return 0.0;
@@ -261,59 +288,64 @@ class ScoreCalculator
      * Blends the Performance Score with the Shuffle Score.
      *
      * @param float $performanceScore
-     * @param int   $productId
-     * @return float
+     * @param int $productId
+     * @param array<string, mixed> $storeConfig
+     * @return float Final blended score.
      */
-    private function applyShuffleLogic(float $performanceScore, int $productId): float
+    private function applyShuffleLogic(float $performanceScore, int $productId, array $storeConfig): float
     {
-        if (!$this->config->isShuffleEnabled()) {
+        if (!$storeConfig['is_shuffle']) {
             return $performanceScore;
         }
 
         $shuffleScore = $this->shuffleCalculator->calculateShuffleScore($productId);
         $blendFactor  = $this->shuffleCalculator->getBlendFactor();
 
-        $final = ($performanceScore * (1.0 - $blendFactor)) + ($shuffleScore * $blendFactor);
-
-        // Note: Shuffle debug is implicit in final score, detailed logging can be too noisy here.
-        return $final;
+        return ($performanceScore * (1.0 - $blendFactor)) + ($shuffleScore * $blendFactor);
     }
 
     /**
      * Calculate Boost based on "News From Date" (Priority) OR "Created At".
+     * Decay is calculated relative to the system's current time.
      *
      * @param string|null $createdAt
      * @param string|null $newsFromDate
      * @param int $pid
      * @param int $storeId
-     * @return int
+     * @param array<string, mixed> $storeConfig
+     * @return int Boost value from 0 to 100.
      */
-    private function calculateFreshnessBoost(?string $createdAt, ?string $newsFromDate, int $pid, int $storeId): int
-    {
-        $duration = $this->config->getFreshnessDuration($storeId);
+    private function calculateFreshnessBoost(
+        ?string $createdAt,
+        ?string $newsFromDate,
+        int $pid,
+        int $storeId,
+        array $storeConfig
+    ): int {
+        $duration = (int)$storeConfig['freshness_duration'];
         if ($duration <= 0) {
-            return 0;
+            return self::MIN_SCORE;
         }
 
-        $utc = new \DateTimeZone('UTC');
-        $now = new \DateTime('now', $utc);
+        $now = $this->getNowReference($storeId);
 
         try {
             // 1. Priority: Check "Set Product as New From"
-            if ($newsFromDate) {
-                $newsDate = new \DateTime($newsFromDate, $utc);
+            if ($newsFromDate !== null) {
+                $newsDate = new \DateTimeImmutable($newsFromDate, new \DateTimeZone(self::TIMEZONE_UTC));
                 $diff = $now->diff($newsDate);
 
+                // If date is entirely in the future
                 if ($diff->invert === 0) {
-                    if ($this->shouldLog($storeId)) {
+                    if ($storeConfig['is_debug']) {
                         $this->log($storeId, $pid, "FRESH: Future 'News From' date detected. Max Boost.");
                     }
-                    return 100;
+                    return self::MAX_SCORE;
                 }
 
                 if ($diff->days < $duration) {
-                    $boost = (int)(100 * (1.0 - ($diff->days / $duration)));
-                    if ($this->shouldLog($storeId)) {
+                    $boost = (int)(self::MAX_SCORE * (1.0 - ($diff->days / $duration)));
+                    if ($storeConfig['is_debug']) {
                         $this->log($storeId, $pid, "FRESH: Applied via 'News From'.", ['days_old' => $diff->days, 'boost' => $boost]);
                     }
                     return $boost;
@@ -321,40 +353,67 @@ class ScoreCalculator
             }
 
             // 2. Fallback: Check "Created At"
-            if ($createdAt) {
-                $createdDate = new \DateTime($createdAt, $utc);
-                $diff = $now->diff($createdDate)->days;
+            if ($createdAt !== null) {
+                $createdDate = new \DateTimeImmutable($createdAt, new \DateTimeZone(self::TIMEZONE_UTC));
+                $diffDays = (int)$now->diff($createdDate)->days;
 
-                if ($diff < $duration) {
-                    $boost = (int)(100 * (1.0 - ($diff / $duration)));
-                    if ($this->shouldLog($storeId)) {
-                        $this->log($storeId, $pid, "FRESH: Applied via 'Created At'.", ['days_old' => $diff, 'boost' => $boost]);
+                if ($diffDays < $duration) {
+                    $boost = (int)(self::MAX_SCORE * (1.0 - ($diffDays / $duration)));
+                    if ($storeConfig['is_debug']) {
+                        $this->log($storeId, $pid, "FRESH: Applied via 'Created At'.", ['days_old' => $diffDays, 'boost' => $boost]);
                     }
                     return $boost;
                 }
-
-                // Log why boost is 0 if debug is on
-                if ($this->shouldLog($storeId)) {
-                    $this->log($storeId, $pid, "FRESH: Product too old.", ['days_old' => $diff, 'limit' => $duration]);
-                }
             }
         } catch (\Exception $e) {
-            $this->logger->warning("Date calculation error for Product $pid: " . $e->getMessage());
+            $this->logger->warning("Amadeco Behavioral: Date calculation error for Product $pid: " . $e->getMessage());
         }
 
-        return 0;
+        return self::MIN_SCORE;
     }
 
     /**
-     * Check if logging is enabled for this store.
-     * Use a minimal check to reduce overhead.
+     * Retrieves or builds the memoized configuration array for a specific store.
+     * Prevents O(N) configuration lookups during massive catalog processing.
      *
      * @param int $storeId
-     * @return bool
+     * @return array<string, mixed> Configuration metrics.
      */
-    private function shouldLog(int $storeId): bool
+    private function getStoreConfig(int $storeId): array
     {
-        return $this->config->isDebugEnabled($storeId);
+        if (!isset($this->storeConfigCache[$storeId])) {
+            $this->storeConfigCache[$storeId] = [
+                'is_debug'           => $this->config->isDebugEnabled($storeId),
+                'weights'            => $this->config->getWeights($storeId),
+                'ctr_ceiling'        => $this->config->getCtrNormalizationCeiling($storeId),
+                'bayesian_threshold' => $this->config->getBayesianConfidenceThreshold($storeId),
+                'freshness_duration' => $this->config->getFreshnessDuration($storeId),
+                'is_coming_soon'     => $this->config->isComingSoonBoostEnabled($storeId),
+                'is_shuffle'         => $this->config->isShuffleEnabled($storeId),
+            ];
+        }
+
+        return $this->storeConfigCache[$storeId];
+    }
+
+    /**
+     * Retrieves a single memoized "Now" DateTime object per store using TimezoneInterface.
+     * Prevents instantiating 100,000+ date objects per cron run while remaining mockable.
+     *
+     * @param int $storeId
+     * @return \DateTimeImmutable
+     */
+    private function getNowReference(int $storeId): \DateTimeImmutable
+    {
+        if (!isset($this->nowCache[$storeId])) {
+            // Retrieve current time in UTC (false flag prevents timezone conversion)
+            $nowMutable = $this->timezone->date(null, null, false);
+
+            // Convert to immutable to prevent accidental mutation across the loop
+            $this->nowCache[$storeId] = \DateTimeImmutable::createFromMutable($nowMutable);
+        }
+
+        return $this->nowCache[$storeId];
     }
 
     /**
@@ -363,7 +422,7 @@ class ScoreCalculator
      * @param int $storeId
      * @param int $pid
      * @param string $msg
-     * @param array $context
+     * @param array<string, mixed> $context
      * @return void
      */
     private function log(int $storeId, int $pid, string $msg, array $context = []): void

@@ -5,7 +5,7 @@
         <behavioral_merchandising>
             <general>
                 <enable>1</enable>
-                <analysis_period>360</analysis_period>
+                <analysis_period>60</analysis_period>
                 <debug_mode>0</debug_mode>
             </general>
             <weights>

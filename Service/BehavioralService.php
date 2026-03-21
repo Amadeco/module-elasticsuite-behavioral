@@ -1,43 +1,72 @@
 <?php
+/**
+ * Amadeco_ElasticSuiteBehavioral
+ *
+ * @category  Amadeco
+ * @package   Amadeco_ElasticSuiteBehavioral
+ * @author    Amadeco Core Team
+ */
+
 declare(strict_types=1);
 
 namespace Amadeco\ElasticSuiteBehavioral\Service;
 
 use Amadeco\ElasticSuiteBehavioral\Api\BehavioralServiceInterface;
+use Amadeco\ElasticSuiteBehavioral\Api\Data\BehavioralMetricInterface;
 use Amadeco\ElasticSuiteBehavioral\Model\Calculator\ScoreCalculator;
 use Amadeco\ElasticSuiteBehavioral\Model\Config;
 use Amadeco\ElasticSuiteBehavioral\Model\ResourceModel\BehavioralData;
 use Magento\CatalogSearch\Model\Indexer\Fulltext as FulltextIndexer;
 use Magento\Framework\Exception\LocalizedException;
-use Magento\Framework\Indexer\IndexerRegistry;
+use Magento\Framework\Indexer\IndexerInterfaceFactory;
+use Magento\Store\Api\Data\StoreInterface;
 use Magento\Store\Model\StoreManagerInterface;
 use Psr\Log\LoggerInterface;
 
 /**
- * Orchestrates behavioral analysis pipeline.
+ * Orchestrates the behavioral analysis pipeline.
  *
  * Logic:
  * 1. Iterates through all stores.
  * 2. Fetches Global Stats (Views/Clicks) ONCE per store to establish a stable baseline.
- * 3. Streams product data using Generators.
- * 4. Batches updates to DB.
+ * 3. Streams product data using Generators to maintain O(1) memory complexity.
+ * 4. Batches updates to DB to optimize I/O operations.
  */
 final class BehavioralService implements BehavioralServiceInterface
 {
+    /**
+     * Number of records processed and saved in a single database transaction.
+     */
     private const int BATCH_SIZE = 1000;
 
+    /**
+     * Default CTR fallback to prevent division by zero in zero-traffic stores.
+     */
+    private const float DEFAULT_FALLBACK_CTR = 0.02;
+
+    /**
+     * @param BehavioralData $resourceModel
+     * @param ScoreCalculator $calculator
+     * @param Config $config
+     * @param IndexerInterfaceFactory $indexerFactory
+     * @param StoreManagerInterface $storeManager
+     * @param LoggerInterface $logger
+     */
     public function __construct(
         private readonly BehavioralData $resourceModel,
         private readonly ScoreCalculator $calculator,
         private readonly Config $config,
-        private readonly IndexerRegistry $indexerRegistry,
+        private readonly IndexerInterfaceFactory $indexerFactory,
         private readonly StoreManagerInterface $storeManager,
         private readonly LoggerInterface $logger
     ) {
     }
 
     /**
+     * Execute the behavioral analysis process for all enabled stores.
+     *
      * @throws LocalizedException
+     * @return void
      */
     public function execute(): void
     {
@@ -49,13 +78,16 @@ final class BehavioralService implements BehavioralServiceInterface
         $this->logger->info('Amadeco Behavioral Analysis: Starting execution.', ['period_days' => $period]);
 
         $totalProcessed = 0;
+
+        // Note: getStores() implicitly excludes the Admin store (ID 0)
         $stores = $this->storeManager->getStores();
 
+        /** @var StoreInterface $store */
         foreach ($stores as $store) {
             $storeId = (int)$store->getId();
 
-            // Skip admin store or disabled config
-            if ($storeId === 0 || !$this->config->isEnabled($storeId)) {
+            // Skip disabled config
+            if (!$this->config->isEnabled($storeId)) {
                 continue;
             }
 
@@ -66,6 +98,7 @@ final class BehavioralService implements BehavioralServiceInterface
         }
 
         $this->logger->info('Amadeco Behavioral Analysis: Completed.', ['total_processed' => $totalProcessed]);
+
         $this->invalidateIndex();
     }
 
@@ -74,30 +107,36 @@ final class BehavioralService implements BehavioralServiceInterface
      *
      * @param int $storeId
      * @param int $period
-     * @return int Number of products processed.
+     * @return int Number of products successfully processed.
      */
     private function processStore(int $storeId, int $period): int
     {
-        // 1. Fetch Global Baselines (Ceilings & Averages)
-        // These are static for the duration of this store's processing to prevent "Drifting Average".
+        // 1. Fetch Global Baselines (Ceilings) from MySQL
         $storeCeilings = $this->resourceModel->getStoreCeilings($storeId, $period);
-        $trafficStats  = $this->resourceModel->getGlobalTrafficStats($storeId, $period);
+
+        // 2. Fetch Elasticsearch Data ONCE via DTO Contract
+        $trackerData = $this->resourceModel->getTrackerDataBag($storeId, $period);
 
         // Calculate a stable Global Average CTR for this store
-        // Prevent division by zero if store has no traffic
-        $globalAverageCtr = $trafficStats['global_views'] > 0
-            ? $trafficStats['global_clicks'] / $trafficStats['global_views']
-            : 0.02; // Default fallback to 2%
-
+        $globalAverageCtr = $trackerData->getGlobalViews() > 0
+            ? $trackerData->getGlobalClicks() / $trackerData->getGlobalViews()
+            : self::DEFAULT_FALLBACK_CTR;
 
         // Merge stats for the Calculator
-        $stats = $storeCeilings + $trafficStats + ['global_average_ctr' => $globalAverageCtr];
+        $stats = array_merge($storeCeilings, [
+            'global_views'       => $trackerData->getGlobalViews(),
+            'global_clicks'      => $trackerData->getGlobalClicks(),
+            'max_atc'            => $trackerData->getMaxAtc(),
+            'global_average_ctr' => $globalAverageCtr
+        ]);
 
         $batch = [];
         $count = 0;
 
-        // 2. Stream Data & Process Batches
-        foreach ($this->resourceModel->collectAggregatedDataGenerator($storeId, $period) as $metric) {
+        // 3. Stream Data & Process Batches via Generator (Passing the DTO)
+        $generator = $this->resourceModel->collectAggregatedDataGenerator($storeId, $period, $trackerData);
+
+        foreach ($generator as $metric) {
             $batch[] = $metric;
 
             if (count($batch) >= self::BATCH_SIZE) {
@@ -107,7 +146,6 @@ final class BehavioralService implements BehavioralServiceInterface
             }
         }
 
-        // Process remaining
         if (!empty($batch)) {
             $this->processMetricsBatch($batch, $stats);
             $count += count($batch);
@@ -117,10 +155,11 @@ final class BehavioralService implements BehavioralServiceInterface
     }
 
     /**
-     * Calculate and Save a batch of scores.
+     * Calculate and save a batch of product scores.
      *
-     * @param array $metrics
-     * @param array $stats Contains max_sales, max_revenue, global_average_ctr
+     * @param BehavioralMetricInterface[] $metrics Array of hydrated DTOs
+     * @param array<string, float|int> $stats Contains max_sales, max_revenue, global_average_ctr
+     * @return void
      */
     private function processMetricsBatch(array $metrics, array $stats): void
     {
@@ -128,21 +167,30 @@ final class BehavioralService implements BehavioralServiceInterface
         foreach ($metrics as $metric) {
             $rows[] = $this->calculator->calculateRow($metric, $stats);
         }
+
         $this->resourceModel->saveScoresBatch($rows);
     }
 
     /**
+     * Invalidate the ElasticSuite Fulltext index so new scores are pushed to Elasticsearch.
+     * * Handles exceptions gracefully to avoid failing the entire cron just because
+     * indexer states are locked or misconfigured.
+     *
      * @return void
      */
     private function invalidateIndex(): void
     {
         try {
-            $indexer = $this->indexerRegistry->get(FulltextIndexer::INDEXER_ID);
+            $indexer = $this->indexerFactory->create()->load(FulltextIndexer::INDEXER_ID);
+
             if (!$indexer->isScheduled()) {
                 $indexer->invalidate();
             }
         } catch (\Throwable $e) {
-            $this->logger->warning('Indexer invalidation failed.', ['error' => $e->getMessage()]);
+            $this->logger->warning(
+                'Amadeco Behavioral Analysis: Indexer invalidation failed.',
+                ['error' => $e->getMessage()]
+            );
         }
     }
 }
